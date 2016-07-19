@@ -33,6 +33,9 @@ require 'lib/deprecate.pm';
 # list special cases of version numbers that are OK here
 # version numbering discontinuities (epochs, added digits) cause these
 my %ok = (
+       "libencode-perl" => {
+               "2.72" => "2.77",
+       },
        "libtest-simple-perl" => {
                "0.98" => "0.98",
        },
@@ -41,7 +44,13 @@ my %ok = (
        },
        "libfile-spec-perl" => {
                "3.48_01" => "3.4801",
+               "3.56"    => "3.5600",
+               "3.56_01" => "3.5601",
        },
+       # bug #808629
+       "libautodie-perl" => {
+                "2.26"   => "2.29",
+       }
 );
 
 # list special cases where a Breaks entry doesn't need to imply
@@ -116,6 +125,7 @@ my %is_perl_binary;
 
 my %deps_found;
 my $breaks_total = 0;
+my $tests_per_breaks = 4;
 
 for my $perl_package_info ($control->get_packages) {
 	my $perl_package_name = $perl_package_info->{Package};
@@ -129,7 +139,7 @@ for my $perl_package_info ($control->get_packages) {
 		next if !exists $perl_package_info->{$deptype};
 
 		# Dpkg::Deps cannot parse unsubstituted substvars so remove this
-		$perl_package_info->{$deptype} =~ s/\${perlapi:Provides}//;
+		$perl_package_info->{$deptype} =~ s/\$\{perlapi:Provides}//;
 
 		my $parsed = deps_parse($perl_package_info->{$deptype});
 		next if !defined $parsed;
@@ -140,7 +150,7 @@ for my $perl_package_info ($control->get_packages) {
 	}
 }
 
-plan tests => 3 * $breaks_total + 2;
+plan tests => $tests_per_breaks * $breaks_total + 2;
 
 ok($breaks_total, "successfully parsed debian/control");
 
@@ -157,11 +167,15 @@ for my $perl_package_name (keys %deps_found) {
 		my $module = deb2cpan($broken);
 		my ($archive_epoch, $archive_digits) = get_archive_info($broken);
 
-		my $broken_version = $dep_found->{$breaksname}{$broken}{version};
-		$broken_version =~ s/-\d+$//; # remove the Debian revision
-
 		SKIP: {
-			skip("$module is unknown to Module::CoreList", 3)
+			my $broken_version = $dep_found->{$breaksname}{$broken}{version};
+
+			skip("$module Breaks entry is unversioned", $tests_per_breaks)
+				if !defined $broken_version;
+
+			$broken_version =~ s/-\d+$//; # remove the Debian revision
+
+			skip("$module is unknown to Module::CoreList", $tests_per_breaks)
 				if !exists $corelist->{$module};
 
 			my $corelist_version =
@@ -171,13 +185,24 @@ for my $perl_package_name (keys %deps_found) {
 
 			is($broken_version, $corelist_version,
 				"Breaks for $broken in $perl_package_name matches Module::CoreList for $module");
+			# help automating fixes for major version upgrades
+			# usage example:
+			#  prove -v debian/t/control.t 2>&1 | sed -n 's,# s/,s/, p' | sed -f - -i debian/control
+			if ($broken_version ne $corelist_version) {
+				diag("s/$broken (<< $broken_version)/$broken (<< $corelist_version)/");
+			}
 
-			skip("not checking Replaces and Provides for $broken in $perl_package_name", 2)
+			skip("not checking Replaces and Provides for $broken in $perl_package_name", $tests_per_breaks - 1)
 				if $triplet_check_skip{$perl_package_name} &&
 					grep { $_ eq $broken } @{$triplet_check_skip{$perl_package_name}};
 
 			ok(exists $dep_found->{Replaces}{$broken},
 				"Breaks for $broken in $perl_package_name implies Replaces");
+
+			my $replaced_version = $dep_found->{Replaces}{$broken}{version};
+			$replaced_version =~ s/-\d+$//; # remove the Debian revision to mirror $broken_version
+			is($replaced_version, $broken_version,
+				"Replaces version for $broken in $perl_package_name matches Breaks");
 
 			if (exists $deprecated{$broken}) {
 				ok(!exists $dep_found->{Provides}{$broken},
